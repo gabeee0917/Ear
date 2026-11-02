@@ -700,6 +700,13 @@ button.cell:active { filter: brightness(0.92); }
 .v-note { color: var(--bad); }
 @media (max-width: 360px) { .v-set { padding: 6px 9px; } .v-sets { gap: 5px; } }
 .qv-chart { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; font-weight: 600; color: var(--accent); white-space: nowrap; }
+
+/* On the guitar: the tab under every answer. */
+.fb-tab { margin-top: 12px; padding: 10px 12px 12px; border-radius: 12px; background: var(--canvas); }
+.fb-tab-title { font-size: 11.5px; font-weight: 650; letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-2); margin: 0 0 6px; }
+.fb-tab pre.tab { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 13px; line-height: 1.35; color: var(--ink); overflow-x: auto; white-space: pre; }
+.fb-tab-list { display: grid; margin-top: 8px; font-size: 13px; color: var(--ink-2); }
+.fb-tab-note { margin: 8px 0 0; font-size: 13px; color: var(--ink-2); line-height: 1.4; }
 </style>
 </head>
 <body>
@@ -2792,7 +2799,105 @@ const Voicing = (() => {
     return best;
   }
 
-  return { forChord, candidates, assign, topOf, roughness,
+  /* ================= Where a line sits on the neck =================
+     The recordings are pitches, not strings, so a note or a melody has no
+     string of its own. This picks one ordinary way to play it: each event
+     (a note, or notes sounded together) on real strings within one hand,
+     rising strings for rising notes, the hand kept in as few positions as
+     it can manage and low on the neck where it can be. A note below the
+     low E or above fret 15 is moved by an octave, and says so. */
+  const TOP = OPEN[5] + MAX_FRET;
+  function placements(notes, span) {
+    if (span == null) span = HAND;
+    const opts = notes.map(n => {
+      const o = [];
+      for (let s = 0; s < 6; s++) { const f = n - OPEN[s]; if (f >= 0 && f <= MAX_FRET) o.push({ s, f }); }
+      return o;
+    });
+    const out = [];
+    const walk = (i, acc) => {
+      if (i === notes.length) {
+        const fr = acc.filter(p => p.f > 0).map(p => p.f);
+        if (fr.length && Math.max.apply(null, fr) - Math.min.apply(null, fr) > span) return;
+        out.push(acc.slice());
+        return;
+      }
+      for (const o of opts[i]) {
+        if (acc.length && o.s <= acc[acc.length - 1].s) continue;   // rising strings
+        acc.push(o); walk(i + 1, acc); acc.pop();
+      }
+    };
+    walk(0, []);
+    return out;
+  }
+  /* A guitarist picks a position first — where the first finger sits —
+     and plays the line inside it, reaching out only when a note is not
+     there. So every position on the neck is tried, each event is put where
+     it falls best for that hand, and the position that holds the whole
+     line most comfortably (lowest on the neck when it is a tie) wins. Open
+     strings belong to the low positions. */
+  const cellCost = (c, p) => {
+    let sc = 0;
+    for (const x of c) {
+      if (x.f === 0) { sc += p <= 3 ? 0 : 3; continue; }
+      if (x.f < p) sc += 4 * (p - x.f);
+      else if (x.f > p + 3) sc += x.f > p + 4 ? 4 * (x.f - p - 3) : 1;   // a stretch, then a shift
+    }
+    return sc + 0.01 * c.reduce((a, x) => a + x.f, 0);
+  };
+  function tabFor(events) {
+    const evs = events.map(ns => {
+      let n = ns.slice().sort((a, b) => a - b), shift = 0;
+      while (Math.min.apply(null, n) < OPEN[0]) { n = n.map(x => x + 12); shift += 12; }
+      while (Math.max.apply(null, n) > TOP) { n = n.map(x => x - 12); shift -= 12; }
+      let cands = placements(n), stretch = false;
+      /* A tight cluster (three notes a semitone or two apart, sounded
+         together) cannot sit in one hand on rising strings. Then the
+         narrowest real stretch is shown, and flagged, rather than anything
+         off the neck. */
+      if (!cands.length) {
+        stretch = true;
+        // Up to six frets is a reach a hand can make; past that it is not a shape.
+        for (let w = HAND + 1; w <= HAND + 2 && !cands.length; w++) cands = placements(n, w);
+      }
+      /* More notes than there are strings to rise across (four notes above
+         A4, say): no hand holds them at once in standard tuning. They are
+         written one after another instead, and the tab says why. */
+      let split = false;
+      if (!cands.length) { split = true; stretch = false; cands = [n.map(x => spotsOf(x)[0])]; }
+      return { notes: n, shift, cands, stretch, split };
+    });
+    let best = null;
+    for (let p = 0; p <= MAX_FRET - 3; p++) {
+      let score = 0.35 * p;
+      const pick = evs.map(e => {
+        let bc = e.cands[0], bs = Infinity;
+        for (const c of e.cands) { const v = cellCost(c, p); if (v < bs) { bs = v; bc = c; } }
+        score += bs;
+        return bc;
+      });
+      if (!best || score < best.score) best = { score, pick, p };
+    }
+    return evs.map((e, i) => ({ cells: best.pick[i], shift: e.shift, position: best.p, stretch: e.stretch, split: e.split }));
+  }
+  // Every place a pitch can be played, lowest fret first.
+  function spotsOf(midi) {
+    const out = [];
+    for (let s = 5; s >= 0; s--) { const f = midi - OPEN[s]; if (f >= 0 && f <= MAX_FRET) out.push({ s, f }); }
+    return out.sort((a, b) => a.f - b.f);
+  }
+  /* The tab itself: six lines, high e on top as tab is written, one column
+     per event, a fret number where a string sounds. */
+  function tabText(columns) {
+    const w = columns.map(c => Math.max(1, ...c.map(p => String(p.f).length)));
+    return [5, 4, 3, 2, 1, 0].map(s => LET[s] + '|-' + columns.map((c, i) => {
+      const hit = c.find(p => p.s === s);
+      const cell = hit ? String(hit.f) : '';
+      return cell + '-'.repeat(w[i] - cell.length);
+    }).join('--') + '-|').join('\n');
+  }
+
+  return { forChord, candidates, assign, topOf, roughness, tabFor, spotsOf, tabText, STR, LET,
     OPEN, LOW, HIGH, E_SHAPE, A_SHAPE,
     FAMILIES, FAMILY, TRIAD_SETS, setName, stringsSaid, chartOf, library, pick, canPlay, fixed };
 })();
@@ -3944,7 +4049,7 @@ const Drills = (() => {
       if (!v) return { label: null, family: null, notes: p.slice() };
       near = centreOf(v.notes);
       parts[i] = v.notes.slice();
-      return { label: v.label, family: v.family, notes: v.notes.slice(), strings: v.strings.slice(), chart: v.chart };
+      return { label: v.label, family: v.family, notes: v.notes.slice(), strings: v.strings.slice(), frets: v.frets.slice(), chart: v.chart };
     });
     q.strings = q.voicings.reduce((a, v) => a.concat(v && v.strings ? v.strings : []), []);
   }
@@ -6015,6 +6120,8 @@ if (typeof module !== 'undefined') module.exports = { Voice };
     vVary: true, vLabel: 'before', vStyle: 'mixed',
     vFams: Object.fromEntries(V.FAMILIES.map(f => [f.id, true])),
     vSets: { 0: true, 1: true, 2: true, 3: true },
+    // After every answer: how it is played on the guitar — tab, chord shapes, voicings.
+    tabAfter: true,
   });
 
   const S = {
@@ -6274,7 +6381,10 @@ if (typeof module !== 'undefined') module.exports = { Voice };
     const q = S.q, when = S.settings.vLabel;
     const vs = q && q.voicings ? q.voicings.filter(v => v && v.label) : [];
     box.innerHTML = '';
-    box.hidden = !vs.length || when === 'off' || (when === 'after' && !answered);
+    // Once answered, the voicings are written out in full in the guitar tab
+    // under the answer, so the card does not say them twice.
+    box.hidden = !vs.length || when === 'off' || (when === 'after' && !answered)
+      || (answered && S.settings.tabAfter);
     if (box.hidden) return;
     const line = v => {
       const l = el('span', 'qv-l', v.label);
@@ -6618,6 +6728,10 @@ if (typeof module !== 'undefined') module.exports = { Voice };
     /* Where it sat on the guitar. After the answer only — the string set
        alone identifies exactly one chord in its key about a third of the
        time, so before answering it would hand over the answer. */
+    if (S.settings.tabAfter) {
+      const t = tabBlock(q);
+      if (t) fb.append(t);
+    }
     if (q.where) {
       const w = el('div', 'fb-where');
       w.append(el('span', 'fb-where-label', 'Where'), el('span', 'fb-where-text', q.where));
@@ -6629,6 +6743,68 @@ if (typeof module !== 'undefined') module.exports = { Voice };
     fb.append(next);
     next.focus({ preventScroll: true });
   }
+
+  /* ---------- On the guitar ----------
+     After every answer: the question written as tab. Chords keep the exact
+     grip they were played in, with the voicing named; notes, melodies and
+     notes sounded together get one ordinary way to play them, in one hand
+     position (the recordings are pitches, so that part is a suggestion,
+     and it says so). A single note also lists everywhere else it lives. */
+  const STRING_WORD = ['low E', 'A', 'D', 'G', 'B', 'high e'];
+  const spotWord = p => `${STRING_WORD[p.s]} string ${p.f === 0 ? 'open' : 'fret ' + p.f}`;
+  function tabEvents(q) {
+    const parts = q && q.audio ? q.audio.parts : [];
+    if (!parts.length) return null;
+    if (q.voicings && q.voicings.some(Boolean)) {
+      return parts.map((p, i) => {
+        const v = q.voicings[i];
+        if (v && v.strings && v.frets) return { cells: v.strings.map((s, k) => ({ s, f: v.frets[k] })), shift: 0, voicing: v };
+        return Object.assign(V.tabFor([p])[0], { voicing: null });
+      });
+    }
+    return V.tabFor(parts);
+  }
+  function tabBlock(q) {
+    const evs = tabEvents(q);
+    if (!evs || !evs.length) return null;
+    const box = el('div', 'fb-tab');
+    box.append(el('p', 'fb-tab-title', 'On the guitar'));
+    const pre = el('pre', 'tab');
+    pre.textContent = V.tabText(evs.reduce((a, e) => a.concat(e.split ? e.cells.map(c => [c]) : [e.cells]), []));
+    pre.setAttribute('aria-label', evs.map(e => e.cells.map(spotWord).join(e.split ? ' then ' : ' with ')).join(', then '));
+    box.append(pre);
+    const chords = evs.filter(e => e.voicing);
+    if (chords.length) {
+      const ol = el('ol', 'qv-list fb-tab-list');
+      evs.forEach((e, i) => {
+        if (!e.voicing) return;
+        const li = el('li');
+        const l = el('span', 'qv-l', e.voicing.label || 'Chord');
+        if (e.voicing.chart) l.append(' ', el('span', 'qv-chart', e.voicing.chart));
+        li.append(el('span', 'qv-n', evs.length > 1 ? ORDINAL[i] || String(i + 1) : ''), l);
+        ol.append(li);
+      });
+      box.append(ol);
+    } else {
+      const notes = el('p', 'fb-tab-note');
+      const single = evs.length === 1 && evs[0].cells.length === 1;
+      if (single) {
+        const here = evs[0].cells[0];
+        const midi = OPEN_MIDI[here.s] + here.f;
+        const others = V.spotsOf(midi).filter(p => p.s !== here.s);
+        notes.textContent = spotWord(here) + (others.length ? '. Also: ' + others.map(spotWord).join(' · ') : '');
+      } else {
+        const pos = evs[0].position;
+        notes.textContent = pos ? `One way to play it, with the hand around fret ${pos}.` : 'One way to play it, in open position.';
+      }
+      if (evs.some(e => e.shift)) notes.textContent += ' Moved an octave to fit the neck.';
+      if (evs.some(e => e.stretch)) notes.textContent += ' Those notes together are a wide stretch: no one-hand shape holds them all.';
+      if (evs.some(e => e.split)) notes.textContent += ' Some notes sit too close together to hold at once in standard tuning, so they are written one after another.';
+      box.append(notes);
+    }
+    return box;
+  }
+  const OPEN_MIDI = V.OPEN;
 
   // How far the answer given sits from the right one, the shorter way round.
   function gapLine(mine, right, isChord, isDeg, degreeMode) {
@@ -8227,7 +8403,7 @@ if (typeof module !== 'undefined') module.exports = { Voice };
     }
     if (['question', 'key'].includes(d.instEvery)) s.instEvery = d.instEvery;
     ['feel', 'drone', 'droneFifth', 'mixDrill', 'borrowed', 'daily', 'statsMix', 'statsTime',
-      'singHear', 'guitarAnswer', 'anchorsOn', 'offline'].forEach(k => { if (typeof d[k] === 'boolean') s[k] = d[k]; });
+      'singHear', 'guitarAnswer', 'anchorsOn', 'offline', 'tabAfter'].forEach(k => { if (typeof d[k] === 'boolean') s[k] = d[k]; });
     if (typeof d.vVary === 'boolean') s.vVary = d.vVary;
     if (['before', 'after', 'off'].includes(d.vLabel)) s.vLabel = d.vLabel;
     if (['mixed', 'one'].includes(d.vStyle)) s.vStyle = d.vStyle;
@@ -8595,6 +8771,17 @@ if (typeof module !== 'undefined') module.exports = { Voice };
     }
     fb.append(rows);
     fb.append(el('p', 'fb-explain', `${q.label} — ${q.where}.`));
+    if (S.settings.tabAfter && q.str != null) {
+      // The pitch tester's note is a real spot on the neck, so it is shown as is.
+      const box = el('div', 'fb-tab');
+      box.append(el('p', 'fb-tab-title', 'On the guitar'));
+      const pre = el('pre', 'tab');
+      pre.textContent = V.tabText([[{ s: q.str, f: q.fret }]]);
+      box.append(pre);
+      const others = V.spotsOf(q.midi).filter(p => p.s !== q.str);
+      if (others.length) box.append(el('p', 'fb-tab-note', 'Also: ' + others.map(spotWord).join(' · ')));
+      fb.append(box);
+    }
     if (S.settings.sayVerdict) {
       const nm = q.names.join(' or ');
       speak(ok ? `Correct. ${answerLine(nm)}` : timeout ? `Out of time. ${answerLine(nm)}` : `Not quite. ${answerLine(nm)}`);
@@ -8866,6 +9053,10 @@ if (typeof module !== 'undefined') module.exports = { Voice };
         if (S.warm.given && !hit) {
           fb.append(el('p', 'warm-said-sub', 'You said the ' + S.warm.given
             + '. Play it again and listen for the difference — nothing is counted here.'));
+        }
+        if (S.settings.tabAfter) {
+          const t = tabBlock({ audio: warmSpec(st, key) });
+          if (t) fb.append(t);
         }
         warmNextBtn(S.warm.i === total - 1 ? 'Last one' : 'Next', fb);
       } else {
@@ -9144,6 +9335,13 @@ if (typeof module !== 'undefined') module.exports = { Voice };
      Every family is its own switch, the close triads' string sets too, and
      the label can show before the answer, after it, or not at all. */
   function voicingSettings(v) {
+    const g0 = group('On the guitar');
+    const l0 = el('div', 'list');
+    l0.append(switchRow('Show it on the guitar after each answer', 'Tab for notes and melodies; the exact shape and voicing for chords',
+      () => !!S.settings.tabAfter, val => { S.settings.tabAfter = val; touched(); }));
+    g0.append(l0);
+    g0.append(el('p', 'group-note', 'Chords show the grip they were played in. Notes are recordings with no string of their own, so they get one ordinary way to play them, in one hand position — and a single note lists everywhere else it lives on the neck.'));
+    v.append(g0);
     const g = group('Chord voicings');
     const l = el('div', 'list');
     l.append(switchRow('Mix up the voicings', 'Each chord in a voicing picked from the ones below, a new one each question. Off: one fixed grip per chord',
@@ -10525,6 +10723,10 @@ if (typeof module !== 'undefined') module.exports = { Voice };
         where: S.q.where || '', strings: S.q.strings || null,
         voicings: S.q.voicings ? S.q.voicings.map(v => v && { label: v.label, family: v.family }) : null } : null),
       resolveSpec: () => { const r = resolveSpec(S.q); return r ? JSON.parse(JSON.stringify(r)) : null; },
+      // The tab the answer shows: where each event sits, string 0 the low E.
+      tab: () => { const e = S.q && tabEvents(S.q); return e ? e.map(x => ({ cells: x.cells, shift: x.shift || 0, split: !!x.split, stretch: !!x.stretch })) : null; },
+      // The tab block for any notes, as it would read under an answer.
+      tabOf: parts => { const b = tabBlock({ audio: { parts } }); return b ? b.innerText : null; },
       // Many questions of one drill in one key, without showing them.
       sample: (drill, keyId, n) => {
         const [m, s] = keyId.split(':');
