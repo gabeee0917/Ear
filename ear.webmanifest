@@ -1,0 +1,14 @@
+{
+  "name": "Ear",
+  "short_name": "Ear",
+  "description": "Ear training for guitarists: degrees, chords, progressions and more, in every key.",
+  "start_url": "./ear.html",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#F2F2F7",
+  "theme_color": "#F2F2F7",
+  "icons": [
+    { "src": "ear-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "ear-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
